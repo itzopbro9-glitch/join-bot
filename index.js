@@ -1,71 +1,72 @@
+// index.js — Render Web Layer for Member Shield
+
+require('dotenv').config(); // Ensure your env variables are loaded
 const express = require('express');
 const mongoose = require('mongoose');
 const axios = require('axios');
 const app = express();
 
-// 1. UPDATED DATABASE SCHEMA (Tracks User + Specific Server)
+// 1️⃣ DATABASE SCHEMA (Tracks user per server)
 const userSchema = new mongoose.Schema({
     userId: { type: String, required: true },
-    guildId: { type: String, required: true }, // IMPORTANT: Tracks which server they verified in
+    guildId: { type: String, required: true }, // Server ID
     accessToken: String,
     refreshToken: String,
     username: String,
     verifiedAt: { type: Date, default: Date.now }
 });
-
-// We remove the "unique: true" from userId so a person can verify in multiple servers safely
 const User = mongoose.model('User', userSchema);
 
-// 2. THE MULTI-SERVER VERIFY REDIRECT
+// 2️⃣ VERIFY ENDPOINT
 app.get('/verify', (req, res) => {
-    const guildId = req.query.guild; // Captures ?guild=ID from the link
-    
+    const guildId = req.query.guild;
     if (!guildId) {
         return res.send("<h2>Error: Invalid Link</h2><p>This verification link is missing the Server ID. Please contact the server owner.</p>");
     }
 
-    // We pass 'guildId' into the 'state' parameter so Discord carries it to the callback
     const url = `https://discord.com/oauth2/authorize?client_id=${process.env.CLIENT_ID}&redirect_uri=${encodeURIComponent(process.env.REDIRECT_URI)}&response_type=code&scope=identify%20guilds.join&state=${guildId}`;
-    
     res.redirect(url);
 });
 
-// 3. THE CALLBACK & DATA SAVING
+// 3️⃣ CALLBACK & DATA SAVING
 app.get('/callback', async (req, res) => {
-    const { code, state } = req.query; // 'state' is the guildId we passed earlier
-    
+    const { code, state } = req.query; // state = guildId
     if (!code) return res.send("No authorization code provided.");
 
     try {
         // Trade code for tokens
-        const response = await axios.post('https://discord.com/api/oauth2/token', new URLSearchParams({
-            client_id: process.env.CLIENT_ID,
-            client_secret: process.env.CLIENT_SECRET,
-            grant_type: 'authorization_code',
-            code: code,
-            redirect_uri: process.env.REDIRECT_URI,
-        }));
+        const response = await axios.post(
+            'https://discord.com/api/oauth2/token',
+            new URLSearchParams({
+                client_id: process.env.CLIENT_ID,
+                client_secret: process.env.CLIENT_SECRET,
+                grant_type: 'authorization_code',
+                code: code,
+                redirect_uri: process.env.REDIRECT_URI
+            }),
+            { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } } // ✅ fixed
+        );
 
         const { access_token, refresh_token } = response.data;
-        
-        // Get user details
+
+        // Get user info
         const userRes = await axios.get('https://discord.com/api/users/@me', {
             headers: { Authorization: `Bearer ${access_token}` }
         });
 
-        // SAVE TO DATABASE: Links user to the specific server (state)
+        // Save to DB
         await User.findOneAndUpdate(
-            { userId: userRes.data.id, guildId: state }, 
-            { 
-                accessToken: access_token, 
-                refreshToken: refresh_token, 
+            { userId: userRes.data.id, guildId: state },
+            {
+                accessToken: access_token,
+                refreshToken: refresh_token,
                 username: userRes.data.username,
                 verifiedAt: new Date()
             },
             { upsert: true }
         );
 
-        // --- SUCCESS UI ---
+        // ✅ Success UI
         res.send(`
         <!DOCTYPE html>
         <html>
@@ -94,15 +95,15 @@ app.get('/callback', async (req, res) => {
         `);
 
     } catch (err) {
-        console.error("Error during verification:", err.response?.data || err.message);
+        console.error("Verification Error:", err.response?.data || err.message || err);
         res.status(500).send("Verification failed. Please try again.");
     }
 });
 
-// 4. LAUNCH
+// 4️⃣ DATABASE CONNECTION + SERVER START
 mongoose.connect(process.env.MONGO_URI)
     .then(() => {
         console.log("Database Connected Successfully");
         app.listen(process.env.PORT || 3000, () => console.log("Render Web Server is LIVE"));
     })
-    .catch(err => console.error("Database Connection Failed:", err));
+    .catch(err => console.error("Database Connection Failed:", err));    .catch(err => console.error("Database Connection Failed:", err));
