@@ -7,9 +7,8 @@ const { HttpsProxyAgent } = require('https-proxy-agent');
 const app = express();
 
 /* ================================
-    🛡️ MIDDLEWARE (Body Parsers)
+    🛡️ MIDDLEWARE (Critical for Webhooks)
 ================================ */
-// MUST BE ABOVE ROUTES to handle Discord Webhooks/Revocations
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
@@ -126,19 +125,21 @@ app.get('/callback', async (req, res) => {
 /* ================================
     4️⃣ 🧹 CLEANUP (DEAUTHORIZATION)
 ================================ */
-// Discord will POST to this URL when a user revokes the app
 app.post('/cleanup-user', async (req, res) => {
     try {
+        // Discord sends the user_id in the body for OAuth2 revocations
         const userId = req.body.user_id;
 
         if (userId) {
-            const result = await User.deleteOne({ userId: userId });
-            if (result.deletedCount > 0) {
-                console.log(`[🗑️ CLEANUP] User ${userId} deauthorized. Deleted from DB.`);
+            // findOneAndDelete is more precise for counting stats
+            const deletedUser = await User.findOneAndDelete({ userId: userId });
+            
+            if (deletedUser) {
+                console.log(`[🗑️ CLEANUP] User ${userId} revoked access. Data wiped.`);
             }
         }
 
-        // Send 204 (No Content) back to Discord to acknowledge
+        // Return 200/204 so Discord doesn't keep retrying
         res.status(204).send();
     } catch (error) {
         console.error('[❌ Cleanup Error]', error);
@@ -152,6 +153,6 @@ app.post('/cleanup-user', async (req, res) => {
 mongoose.connect(process.env.MONGO_URI)
     .then(() => {
         console.log("✅ MongoDB Connected");
-        app.listen(process.env.PORT || 3000, () => console.log("🚀 Server LIVE with Cleanup Route"));
+        app.listen(process.env.PORT || 3000, () => console.log("🚀 Server LIVE with Real-time Cleanup"));
     })
     .catch(err => console.error("❌ MongoDB Error:", err));
