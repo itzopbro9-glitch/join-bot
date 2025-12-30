@@ -1,21 +1,21 @@
-// index.js — Render Web Layer for Member Shield
-
-require('dotenv').config(); // Ensure your env variables are loaded
+require('dotenv').config(); 
 const express = require('express');
 const mongoose = require('mongoose');
 const axios = require('axios');
 const app = express();
 
-// 1️⃣ DATABASE SCHEMA (Tracks user per server)
+// 1️⃣ DATABASE SCHEMA (Synchronized with Wispbyte Bot)
 const userSchema = new mongoose.Schema({
     userId: { type: String, required: true },
-    guildId: { type: String, required: true }, // Server ID
     accessToken: String,
     refreshToken: String,
     username: String,
+    guilds: [String], // Array to track multiple servers per user
     verifiedAt: { type: Date, default: Date.now }
 });
-const User = mongoose.model('User', userSchema);
+
+// Avoid "OverwriteModelError" if Render restarts
+const User = mongoose.models.User || mongoose.model('User', userSchema);
 
 // 2️⃣ VERIFY ENDPOINT
 app.get('/verify', (req, res) => {
@@ -24,13 +24,14 @@ app.get('/verify', (req, res) => {
         return res.send("<h2>Error: Invalid Link</h2><p>This verification link is missing the Server ID. Please contact the server owner.</p>");
     }
 
+    // Pass guildId into 'state' so Discord returns it to the callback
     const url = `https://discord.com/oauth2/authorize?client_id=${process.env.CLIENT_ID}&redirect_uri=${encodeURIComponent(process.env.REDIRECT_URI)}&response_type=code&scope=identify%20guilds.join&state=${guildId}`;
     res.redirect(url);
 });
 
 // 3️⃣ CALLBACK & DATA SAVING
 app.get('/callback', async (req, res) => {
-    const { code, state } = req.query; // state = guildId
+    const { code, state } = req.query; // state contains the guildId
     if (!code) return res.send("No authorization code provided.");
 
     try {
@@ -44,7 +45,7 @@ app.get('/callback', async (req, res) => {
                 code: code,
                 redirect_uri: process.env.REDIRECT_URI
             }),
-            { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } } // ✅ fixed
+            { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } }
         );
 
         const { access_token, refresh_token } = response.data;
@@ -54,14 +55,17 @@ app.get('/callback', async (req, res) => {
             headers: { Authorization: `Bearer ${access_token}` }
         });
 
-        // Save to DB
+        // ✅ SYNCED SAVE LOGIC: Links user to the server list
         await User.findOneAndUpdate(
-            { userId: userRes.data.id, guildId: state },
+            { userId: userRes.data.id },
             {
-                accessToken: access_token,
-                refreshToken: refresh_token,
-                username: userRes.data.username,
-                verifiedAt: new Date()
+                $set: {
+                    accessToken: access_token,
+                    refreshToken: refresh_token,
+                    username: userRes.data.username,
+                    verifiedAt: new Date()
+                },
+                $addToSet: { guilds: state } // Adds server ID to the array if not already there
             },
             { upsert: true }
         );
@@ -100,10 +104,12 @@ app.get('/callback', async (req, res) => {
     }
 });
 
-// 4️⃣ DATABASE CONNECTION + SERVER START
+// 4️⃣ DATABASE CONNECTION (Cleaned & Fixed)
 mongoose.connect(process.env.MONGO_URI)
     .then(() => {
-        console.log("Database Connected Successfully");
-        app.listen(process.env.PORT || 3000, () => console.log("Render Web Server is LIVE"));
+        console.log("✅ Database Connected Successfully");
+        app.listen(process.env.PORT || 3000, () => console.log("🚀 Render Web Server is LIVE"));
     })
-    .catch(err => console.error("Database Connection Failed:", err));    .catch(err => console.error("Database Connection Failed:", err));
+    .catch(err => {
+        console.error("❌ Database Connection Failed:", err);
+    });
