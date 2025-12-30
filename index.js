@@ -2,14 +2,20 @@ require('dotenv').config();
 const express = require('express');
 const mongoose = require('mongoose');
 const axios = require('axios');
-const { HttpsProxyAgent } = require('https-proxy-agent'); // Added for Proxy support
+const { HttpsProxyAgent } = require('https-proxy-agent');
 
 const app = express();
 
 /* ================================
+    🛡️ MIDDLEWARE (Body Parsers)
+================================ */
+// MUST BE ABOVE ROUTES to handle Discord Webhooks/Revocations
+app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
+
+/* ================================
     🛡️ PROXY CONFIGURATION
 ================================ */
-// This uses the PROXY_URL from your Render Environment variables
 const proxyUrl = process.env.PROXY_URL;
 const proxyAgent = proxyUrl ? new HttpsProxyAgent(proxyUrl) : null;
 
@@ -19,10 +25,10 @@ const proxyAgent = proxyUrl ? new HttpsProxyAgent(proxyUrl) : null;
 const activeCallbacks = new Set();
 
 /* ================================
-    🟢 WARM-UP ROUTE (RENDER SAFE)
+    🟢 WARM-UP ROUTE
 ================================ */
 app.get('/', (req, res) => {
-    res.status(200).send('🛡️ Member Shield is online (Bypassing blocks with Proxy)');
+    res.status(200).send('🛡️ Member Shield is online (Cleanup & Proxy Active)');
 });
 
 /* ================================
@@ -44,15 +50,9 @@ const User = mongoose.models.User || mongoose.model('User', userSchema);
 ================================ */
 app.get('/verify', (req, res) => {
     const guildId = req.query.guild;
+    if (!guildId) return res.send("<h2>Error</h2><p>Missing server ID.</p>");
 
-    if (!guildId) {
-        return res.send(
-            "<h2>Error</h2><p>Invalid verification link. Missing server ID.</p>"
-        );
-    }
-
-    const url =
-        `https://discord.com/oauth2/authorize` +
+    const url = `https://discord.com/oauth2/authorize` +
         `?client_id=${process.env.CLIENT_ID}` +
         `&redirect_uri=${encodeURIComponent(process.env.REDIRECT_URI)}` +
         `&response_type=code` +
@@ -67,17 +67,12 @@ app.get('/verify', (req, res) => {
 ================================ */
 app.get('/callback', async (req, res) => {
     const { code, state } = req.query;
-
     if (!code) return res.status(400).send("Missing authorization code.");
 
-    // 🔐 BLOCK DUPLICATE CALLBACKS
-    if (activeCallbacks.has(code)) {
-        return res.status(429).send("Duplicate verification blocked.");
-    }
+    if (activeCallbacks.has(code)) return res.status(429).send("Duplicate verification blocked.");
     activeCallbacks.add(code);
 
     try {
-        /* 🔁 TOKEN EXCHANGE (TUNNELED THROUGH PROXY) */
         const tokenRes = await axios.post(
             'https://discord.com/api/oauth2/token',
             new URLSearchParams({
@@ -89,27 +84,21 @@ app.get('/callback', async (req, res) => {
             }),
             { 
                 headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-                // THIS BYPASSES THE DISCORD RATE LIMIT BLOCK
                 httpsAgent: proxyAgent,
                 httpAgent: proxyAgent,
-                proxy: false // Disables axios' internal proxy logic to use Agent instead
+                proxy: false 
             }
         );
 
         const { access_token, refresh_token } = tokenRes.data;
 
-        /* 👤 FETCH USER (ALSO THROUGH PROXY) */
-        const userRes = await axios.get(
-            'https://discord.com/api/users/@me',
-            { 
-                headers: { Authorization: `Bearer ${access_token}` },
-                httpsAgent: proxyAgent,
-                httpAgent: proxyAgent,
-                proxy: false
-            }
-        );
+        const userRes = await axios.get('https://discord.com/api/users/@me', { 
+            headers: { Authorization: `Bearer ${access_token}` },
+            httpsAgent: proxyAgent,
+            httpAgent: proxyAgent,
+            proxy: false
+        });
 
-        /* 💾 SAVE / UPDATE USER */
         await User.findOneAndUpdate(
             { userId: userRes.data.id },
             {
@@ -124,50 +113,45 @@ app.get('/callback', async (req, res) => {
             { upsert: true }
         );
 
-        /* ✅ SUCCESS UI */
-        res.send(`
-<!DOCTYPE html>
-<html>
-<head>
-<title>Verification Successful</title>
-<style>
-body { background:#2c2f33; color:white; font-family:Arial; display:flex; justify-content:center; align-items:center; height:100vh; margin:0; }
-.card { background:#23272a; padding:40px; border-radius:16px; text-align:center; border:2px solid #5865F2; box-shadow:0 10px 25px rgba(0,0,0,.5); }
-h1 { color:#5865F2; margin-bottom:10px; }
-p { color:#b9bbbe; }
-.user { background:#36393f; padding:6px 12px; border-radius:6px; color:white; font-weight:bold; }
-</style>
-</head>
-<body>
-<div class="card">
-  <h1>🛡️ Verified</h1>
-  <p>Welcome <span class="user">${userRes.data.username}</span></p>
-  <p>Your account has been securely backed up.</p>
-  <small>Member Shield System (Proxy Active)</small>
-</div>
-</body>
-</html>
-        `);
+        res.send(`<h1>🛡️ Verified</h1><p>Welcome <b>${userRes.data.username}</b>. Data secured.</p>`);
 
     } catch (err) {
-        console.error("❌ Proxy Verification Error:", err.response?.data || err.message);
-        res.status(500).send("Verification failed. Please retry. (Server under heavy load or blocked)");
+        console.error("❌ Error:", err.response?.data || err.message);
+        res.status(500).send("Verification failed.");
     } finally {
-        // 🔓 RELEASE CALLBACK LOCK AFTER 60s
         setTimeout(() => activeCallbacks.delete(code), 60_000);
     }
 });
 
 /* ================================
-    4️⃣ DATABASE + SERVER START
+    4️⃣ 🧹 CLEANUP (DEAUTHORIZATION)
 ================================ */
+// Discord will POST to this URL when a user revokes the app
+app.post('/cleanup-user', async (req, res) => {
+    try {
+        const userId = req.body.user_id;
+
+        if (userId) {
+            const result = await User.deleteOne({ userId: userId });
+            if (result.deletedCount > 0) {
+                console.log(`[🗑️ CLEANUP] User ${userId} deauthorized. Deleted from DB.`);
+            }
+        }
+
+        // Send 204 (No Content) back to Discord to acknowledge
+        res.status(204).send();
+    } catch (error) {
+        console.error('[❌ Cleanup Error]', error);
+        res.status(500).send();
+    }
+});
+
+/* ================================
+    5️⃣ DATABASE + SERVER START
+=============================== */
 mongoose.connect(process.env.MONGO_URI)
     .then(() => {
         console.log("✅ MongoDB Connected");
-        app.listen(process.env.PORT || 3000, () =>
-            console.log("🚀 Proxy-Enabled Server LIVE")
-        );
+        app.listen(process.env.PORT || 3000, () => console.log("🚀 Server LIVE with Cleanup Route"));
     })
-    .catch(err => {
-        console.error("❌ MongoDB Error:", err);
-    });
+    .catch(err => console.error("❌ MongoDB Error:", err));
