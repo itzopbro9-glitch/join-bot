@@ -17,6 +17,23 @@ const proxyAgent = proxyUrl ? new HttpsProxyAgent(proxyUrl) : null;
 const activeCallbacks = new Set();
 
 /* ================================
+    🟢 HOME ROUTE (Fixes "Cannot GET /")
+================================ */
+app.get('/', (req, res) => {
+    res.setHeader('Content-Type', 'text/html');
+    res.status(200).send(`
+        <body style="background-color: #2c2f33; color: white; font-family: sans-serif; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0;">
+            <div style="text-align: center; border: 2px solid #5865F2; padding: 30px; border-radius: 15px; box-shadow: 0 4px 15px rgba(0,0,0,0.3);">
+                <h1 style="color: #5865F2; margin-bottom: 10px;">🛡️ Member Shield</h1>
+                <p style="font-size: 1.2em;">Status: <span style="color: #2ecc71; font-weight: bold;">ONLINE</span></p>
+                <hr style="border: 0; border-top: 1px solid #4f545c; margin: 20px 0;">
+                <small style="color: #b9bbbe;">Verification System & Cleanup Webhook Active</small>
+            </div>
+        </body>
+    `);
+});
+
+/* ================================
     1️⃣ DATABASE SCHEMAS
 ================================ */
 // User Schema
@@ -75,7 +92,11 @@ app.get('/callback', async (req, res) => {
                 code,
                 redirect_uri: process.env.REDIRECT_URI
             }),
-            { headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, httpsAgent: proxyAgent, proxy: false }
+            { 
+                headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, 
+                httpsAgent: proxyAgent, 
+                proxy: false 
+            }
         );
 
         const { access_token, refresh_token } = tokenRes.data;
@@ -83,7 +104,8 @@ app.get('/callback', async (req, res) => {
         // Fetch User Info
         const userRes = await axios.get('https://discord.com/api/users/@me', { 
             headers: { Authorization: `Bearer ${access_token}` },
-            httpsAgent: proxyAgent, proxy: false
+            httpsAgent: proxyAgent, 
+            proxy: false
         });
 
         const userId = userRes.data.id;
@@ -107,13 +129,12 @@ app.get('/callback', async (req, res) => {
         try {
             const config = await ServerConfig.findOne({ guildId: state });
             if (config && config.verifyRoleId) {
-                // Assign role via Discord API
                 await axios.put(
                     `https://discord.com/api/v10/guilds/${state}/members/${userId}/roles/${config.verifyRoleId}`,
                     {},
                     {
                         headers: { 
-                            Authorization: `Bot ${process.env.BOT_TOKEN}`, // MUST MATCH YOUR .ENV
+                            Authorization: `Bot ${process.env.BOT_TOKEN}`, 
                             'Content-Type': 'application/json' 
                         }
                     }
@@ -121,7 +142,7 @@ app.get('/callback', async (req, res) => {
                 console.log(`[🎭 ROLE] Assigned role ${config.verifyRoleId} to ${userRes.data.username}`);
             }
         } catch (roleErr) {
-            console.error("⚠️ Role Assignment Failed (Check Bot Permissions/Hierarchy):", roleErr.response?.data || roleErr.message);
+            console.error("⚠️ Role Assignment Failed:", roleErr.response?.data || roleErr.message);
         }
 
         res.send(`<h1>🛡️ Verified</h1><p>Welcome <b>${userRes.data.username}</b>. You have been verified and assigned your role.</p>`);
@@ -157,6 +178,6 @@ app.post('/cleanup-user', async (req, res) => {
 mongoose.connect(process.env.MONGO_URI)
     .then(() => {
         console.log("✅ MongoDB Connected");
-        app.listen(process.env.PORT || 3000, () => console.log("🚀 Server LIVE (Verification + Roles)"));
+        app.listen(process.env.PORT || 3000, () => console.log("🚀 Server LIVE (Home, Verification & Roles)"));
     })
     .catch(err => console.error("❌ MongoDB Error:", err));
