@@ -7,32 +7,19 @@ const { HttpsProxyAgent } = require('https-proxy-agent');
 const app = express();
 
 /* ================================
-    🛡️ MIDDLEWARE (Critical for Webhooks)
+    🛡️ MIDDLEWARE
 ================================ */
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-/* ================================
-    🛡️ PROXY CONFIGURATION
-================================ */
 const proxyUrl = process.env.PROXY_URL;
 const proxyAgent = proxyUrl ? new HttpsProxyAgent(proxyUrl) : null;
-
-/* ================================
-    🔐 CALLBACK REPLAY PROTECTION
-================================ */
 const activeCallbacks = new Set();
 
 /* ================================
-    🟢 WARM-UP ROUTE
+    1️⃣ DATABASE SCHEMAS
 ================================ */
-app.get('/', (req, res) => {
-    res.status(200).send('🛡️ Member Shield is online (Cleanup & Proxy Active)');
-});
-
-/* ================================
-    1️⃣ DATABASE SCHEMA
-================================ */
+// User Schema
 const userSchema = new mongoose.Schema({
     userId: { type: String, required: true, unique: true },
     accessToken: String,
@@ -41,8 +28,14 @@ const userSchema = new mongoose.Schema({
     guilds: [String],
     verifiedAt: { type: Date, default: Date.now }
 });
-
 const User = mongoose.models.User || mongoose.model('User', userSchema);
+
+// Server Config Schema (For Roles)
+const serverSchema = new mongoose.Schema({
+    guildId: { type: String, required: true, unique: true },
+    verifyRoleId: String,
+});
+const ServerConfig = mongoose.models.ServerConfig || mongoose.model('ServerConfig', serverSchema);
 
 /* ================================
     2️⃣ VERIFY ENDPOINT
@@ -62,16 +55,17 @@ app.get('/verify', (req, res) => {
 });
 
 /* ================================
-    3️⃣ CALLBACK (PROXY INTEGRATED)
+    3️⃣ CALLBACK (WITH AUTO-ROLE)
 ================================ */
 app.get('/callback', async (req, res) => {
-    const { code, state } = req.query;
+    const { code, state } = req.query; // 'state' is the Guild ID
     if (!code) return res.status(400).send("Missing authorization code.");
 
     if (activeCallbacks.has(code)) return res.status(429).send("Duplicate verification blocked.");
     activeCallbacks.add(code);
 
     try {
+        // Exchange Code for Token
         const tokenRes = await axios.post(
             'https://discord.com/api/oauth2/token',
             new URLSearchParams({
@@ -81,25 +75,22 @@ app.get('/callback', async (req, res) => {
                 code,
                 redirect_uri: process.env.REDIRECT_URI
             }),
-            { 
-                headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-                httpsAgent: proxyAgent,
-                httpAgent: proxyAgent,
-                proxy: false 
-            }
+            { headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, httpsAgent: proxyAgent, proxy: false }
         );
 
         const { access_token, refresh_token } = tokenRes.data;
 
+        // Fetch User Info
         const userRes = await axios.get('https://discord.com/api/users/@me', { 
             headers: { Authorization: `Bearer ${access_token}` },
-            httpsAgent: proxyAgent,
-            httpAgent: proxyAgent,
-            proxy: false
+            httpsAgent: proxyAgent, proxy: false
         });
 
+        const userId = userRes.data.id;
+
+        // Save to Database
         await User.findOneAndUpdate(
-            { userId: userRes.data.id },
+            { userId: userId },
             {
                 $set: {
                     accessToken: access_token,
@@ -112,7 +103,28 @@ app.get('/callback', async (req, res) => {
             { upsert: true }
         );
 
-        res.send(`<h1>🛡️ Verified</h1><p>Welcome <b>${userRes.data.username}</b>. Data secured.</p>`);
+        /* --- 🎭 AUTO-ROLE LOGIC --- */
+        try {
+            const config = await ServerConfig.findOne({ guildId: state });
+            if (config && config.verifyRoleId) {
+                // Assign role via Discord API
+                await axios.put(
+                    `https://discord.com/api/v10/guilds/${state}/members/${userId}/roles/${config.verifyRoleId}`,
+                    {},
+                    {
+                        headers: { 
+                            Authorization: `Bot ${process.env.BOT_TOKEN}`, // MUST MATCH YOUR .ENV
+                            'Content-Type': 'application/json' 
+                        }
+                    }
+                );
+                console.log(`[🎭 ROLE] Assigned role ${config.verifyRoleId} to ${userRes.data.username}`);
+            }
+        } catch (roleErr) {
+            console.error("⚠️ Role Assignment Failed (Check Bot Permissions/Hierarchy):", roleErr.response?.data || roleErr.message);
+        }
+
+        res.send(`<h1>🛡️ Verified</h1><p>Welcome <b>${userRes.data.username}</b>. You have been verified and assigned your role.</p>`);
 
     } catch (err) {
         console.error("❌ Error:", err.response?.data || err.message);
@@ -127,19 +139,11 @@ app.get('/callback', async (req, res) => {
 ================================ */
 app.post('/cleanup-user', async (req, res) => {
     try {
-        // Discord sends the user_id in the body for OAuth2 revocations
         const userId = req.body.user_id;
-
         if (userId) {
-            // findOneAndDelete is more precise for counting stats
             const deletedUser = await User.findOneAndDelete({ userId: userId });
-            
-            if (deletedUser) {
-                console.log(`[🗑️ CLEANUP] User ${userId} revoked access. Data wiped.`);
-            }
+            if (deletedUser) console.log(`[🗑️ CLEANUP] User ${userId} revoked access. Data wiped.`);
         }
-
-        // Return 200/204 so Discord doesn't keep retrying
         res.status(204).send();
     } catch (error) {
         console.error('[❌ Cleanup Error]', error);
@@ -148,11 +152,11 @@ app.post('/cleanup-user', async (req, res) => {
 });
 
 /* ================================
-    5️⃣ DATABASE + SERVER START
+    5️⃣ START SERVER
 =============================== */
 mongoose.connect(process.env.MONGO_URI)
     .then(() => {
         console.log("✅ MongoDB Connected");
-        app.listen(process.env.PORT || 3000, () => console.log("🚀 Server LIVE with Real-time Cleanup"));
+        app.listen(process.env.PORT || 3000, () => console.log("🚀 Server LIVE (Verification + Roles)"));
     })
     .catch(err => console.error("❌ MongoDB Error:", err));
